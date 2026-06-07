@@ -1,14 +1,15 @@
 import {WebSocket, WebSocketServer} from 'ws';
+import {wsArcjet} from '../arcjet.js';
 
 function sendJson(socket, payload) {
-    if(socket.readyState !== WebSocket.OPEN) continue;
+    if (socket.readyState !== WebSocket.OPEN) return;
 
     socket.send(JSON.stringify(payload));
 }
 
 function broadcast(wss, payload) {
     for (const client of wss.clients) {
-        if(client.readyState !== WebSocket.OPEN) return;
+        if (client.readyState !== WebSocket.OPEN) continue;
 
         client.send(JSON.stringify(payload));
     }
@@ -17,7 +18,34 @@ function broadcast(wss, payload) {
 export function attachWebSocketServer(server) {
     const wss = new WebSocketServer({server, path: '/ws', maxPayload: 1024 * 1024});
 
-    wss.on('connection', (socket) => {
+    server.on('upgrade', async (req, socket, head) => {
+        if (wsArcjet) {
+            try {
+                const decision = await wsArcjet.protect(req);
+
+                if (decision.isDenied()) {
+                    if (decision.reason.isRateLimit()) {
+                        socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
+                    } else {
+                        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+                    }
+                    socket.destroy();
+                    return;
+                }
+            } catch (e) {
+                console.error('WS upgrade security error', e);
+                socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n')
+                socket.destroy();
+                return;
+            }
+        }
+
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req);
+        });
+    });
+
+    wss.on('connection', (socket, req) => {
         socket.isAlive = true;
         socket.on('pong', () => {socket.isAlive = true;});
 
